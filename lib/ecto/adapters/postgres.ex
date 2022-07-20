@@ -270,11 +270,27 @@ defmodule Ecto.Adapters.Postgres do
   end
 
   defp advisory_lock(meta, opts, lock, fun) do
+    blocking_queries(meta, lock)
     Ecto.Adapters.SQL.query(meta, "SELECT pg_advisory_lock(#{lock})", [], opts)
     try do
       fun.()
     after
       {:ok, _} = Ecto.Adapters.SQL.query(meta, "SELECT pg_advisory_unlock(#{lock})", [], opts)
+      blocking_queries(meta, lock)
+    end
+  end
+
+  defp blocking_queries(meta, lock) do
+    case Ecto.Adapters.SQL.query(meta, "SELECT pid FROM pg_locks WHERE locktype='advisory' AND objid=#{lock}", [], []) do
+      {:ok, %{rows: []}} ->
+        :ok
+      {:ok, %{rows: pids}} ->
+        pids = pids |> List.flatten() |> Enum.uniq()
+        {:ok, %{rows: queries}} = Ecto.Adapters.SQL.query(meta, "SELECT pid,query FROM pg_stat_activity WHERE pid IN
+          (#{Enum.join(pids, ",")})", [], [])
+        queries = Enum.reject(queries, & String.contains?(Enum.at(&1,1), "pg_locks"))
+        IO.inspect(queries, label: "BLOCKING QUERIES")
+      _ -> :ok
     end
   end
 
