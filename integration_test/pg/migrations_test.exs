@@ -52,7 +52,7 @@ defmodule Ecto.Integration.MigrationsTest do
 
   describe "Migrator" do
     @get_lock_command ~s(LOCK TABLE "schema_migrations" IN SHARE UPDATE EXCLUSIVE MODE)
-    @get_advisory_lock_command ~s[SELECT pg_try_advisory_lock(7535270)]
+    @get_advisory_lock_command ~s[SELECT pg_advisory_lock(7535270)]
     @release_advisory_lock_command ~s[SELECT pg_advisory_unlock(7535270)]
     @create_table_sql ~s(CREATE TABLE IF NOT EXISTS "log_mode_table")
     @create_table_log "create table if not exists log_mode_table"

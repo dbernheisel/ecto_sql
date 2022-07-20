@@ -32,14 +32,8 @@ defmodule Ecto.Adapters.Postgres do
       the entire migration inside a database transaction, including inserting the
       migration version into the migration source (by default, "schema_migrations").
       You may alternatively select `:pg_advisory_lock` which has the benefit
-      of allowing concurrent operations such as creating indexes. (default: `:table_lock`)
-
-  When using the `:pg_advisory_lock` migration lock strategy and Ecto cannot obtain
-  the lock due to another instance occupying the lock, Ecto will wait for 5 seconds
-  and then retry up to 100 times. If the retries are exhausted, the migration will
-  fail. This is configurable on the repo with keys
-  `:migration_advisory_lock_retry_interval_ms` and
-  `:migration_advisory_lock_max_tries`.
+      of allowing concurrent operations such as creating indexes, but is sometimes not
+      supported on other Postgres-compatible databases. (default: `:table_lock`)
 
   ### Connection options
 
@@ -250,24 +244,17 @@ defmodule Ecto.Adapters.Postgres do
     end
 
     opts = Keyword.merge(opts, [timeout: :infinity, telemetry_options: [schema_migration: true]])
-    config = repo.config()
-    lock_strategy = Keyword.get(config, :migration_lock, :table_lock)
-    do_lock_for_migrations(lock_strategy, meta, opts, config, fun)
+    lock_strategy = Keyword.get(repo.config(), :migration_lock, :table_lock)
+    do_lock_for_migrations(lock_strategy, meta, opts, fun)
   end
 
-  defp do_lock_for_migrations(:pg_advisory_lock, meta, opts, config, fun) do
+  defp do_lock_for_migrations(:pg_advisory_lock, meta, opts, fun) do
     lock = :erlang.phash2({:ecto, meta.repo})
 
-    retry_state = %{
-      retry_interval_ms: config[:migration_advisory_lock_retry_interval_ms] || 5000,
-      max_tries: config[:migration_advisory_lock_max_tries] || 100,
-      tries: 0
-    }
-
-    advisory_lock(meta, opts, lock, retry_state, fun)
+    advisory_lock(meta, opts, lock, fun)
   end
 
-  defp do_lock_for_migrations(:table_lock, meta, opts, _config, fun) do
+  defp do_lock_for_migrations(:table_lock, meta, opts, fun) do
     {:ok, res} =
       transaction(meta, opts, fn ->
         # SHARE UPDATE EXCLUSIVE MODE is the first lock that locks
@@ -282,44 +269,12 @@ defmodule Ecto.Adapters.Postgres do
     res
   end
 
-  defp advisory_lock(meta, opts, lock, retry_state, callback) do
-    result = checkout(meta, opts, fn ->
-      case Ecto.Adapters.SQL.query(meta, "SELECT pg_try_advisory_lock(#{lock})", [], opts) do
-        {:ok, %{rows: [[true]]}} ->
-          try do
-            {:ok, callback.()}
-          after
-            {:ok, _} = Ecto.Adapters.SQL.query(meta, "SELECT pg_advisory_unlock(#{lock})", [], opts)
-          end
-        _ ->
-          :no_advisory_lock
-      end
-    end)
-
-    case result do
-      {:ok, callback_result} ->
-        callback_result
-
-      :no_advisory_lock ->
-        maybe_retry_advisory_lock(meta, opts, lock, retry_state, callback)
-    end
-  end
-
-  defp maybe_retry_advisory_lock(meta, opts, lock, retry_state, callback) do
-    interval = retry_state[:retry_interval_ms]
-    max_tries = retry_state[:max_tries]
-    tries = retry_state[:tries]
-
-    if max_tries <= tries do
-      raise "Failed to obtain advisory lock. Tried #{max_tries} times waiting #{interval}ms between tries"
-    else
-      if Keyword.get(opts, :log_migrator_sql, false) do
-        Logger.debug("Migration lock occupied for #{inspect(meta.repo)}. Retry #{tries + 1}/#{max_tries} at #{interval}ms intervals.")
-      end
-
-      Process.sleep(interval)
-      retry_state = %{retry_state | tries: retry_state[:tries] + 1}
-      advisory_lock(meta, opts, lock, retry_state, callback)
+  defp advisory_lock(meta, opts, lock, fun) do
+    Ecto.Adapters.SQL.query(meta, "SELECT pg_advisory_lock(#{lock})", [], opts)
+    try do
+      fun.()
+    after
+      {:ok, _} = Ecto.Adapters.SQL.query(meta, "SELECT pg_advisory_unlock(#{lock})", [], opts)
     end
   end
 
