@@ -270,13 +270,24 @@ defmodule Ecto.Adapters.Postgres do
   end
 
   defp advisory_lock(meta, opts, lock, fun) do
-    blocking_queries(meta, lock)
-    Ecto.Adapters.SQL.query(meta, "SELECT pg_advisory_lock(#{lock})", [], opts)
-    try do
-      fun.()
-    after
-      {:ok, _} = Ecto.Adapters.SQL.query(meta, "SELECT pg_advisory_unlock(#{lock})", [], opts)
+    checkout(meta, opts, fn ->
       blocking_queries(meta, lock)
+      Ecto.Adapters.SQL.query(meta, "SELECT pg_advisory_lock(#{lock})", [], opts)
+      try do
+        fun.()
+      after
+        release_advisory_lock(meta, opts, lock)
+        blocking_queries(meta, lock)
+      end
+    end)
+  end
+
+  defp release_advisory_lock(meta, opts, lock) do
+    case Ecto.Adapters.SQL.query(meta, "SELECT pg_advisory_unlock(#{lock})", [], opts) do
+      {:ok, %{rows: [[true]]}} ->
+        :ok
+      _ ->
+        raise "failed to release migration advisory lock"
     end
   end
 
@@ -286,8 +297,7 @@ defmodule Ecto.Adapters.Postgres do
         :ok
       {:ok, %{rows: pids}} ->
         pids = pids |> List.flatten() |> Enum.uniq()
-        {:ok, %{rows: queries}} = Ecto.Adapters.SQL.query(meta, "SELECT pid,query FROM pg_stat_activity WHERE pid IN
-          (#{Enum.join(pids, ",")})", [], [])
+        {:ok, %{rows: queries}} = Ecto.Adapters.SQL.query(meta, "SELECT pid,query FROM pg_stat_activity WHERE pid IN (#{Enum.join(pids, ",")})", [], [])
         queries = Enum.reject(queries, & String.contains?(Enum.at(&1,1), "pg_locks"))
         IO.inspect(queries, label: "BLOCKING QUERIES")
       _ -> :ok
